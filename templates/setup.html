@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Smart EVM — Genesis Setup</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Orbitron:wght@600;800&display=swap" rel="stylesheet" />
+  <style>
+    body { font-family: 'Inter', sans-serif; }
+    .orbitron { font-family: 'Orbitron', sans-serif; }
+    .bg-grid {
+      background-image:
+        linear-gradient(rgba(99,102,241,0.05) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(99,102,241,0.05) 1px, transparent 1px);
+      background-size: 40px 40px;
+    }
+    @keyframes spin-slow { to { transform: rotate(360deg); } }
+    .animate-spin-slow { animation: spin-slow 4s linear infinite; }
+    @keyframes ping-amber {
+      0%   { transform: scale(1); opacity: 1; }
+      75%, 100% { transform: scale(2); opacity: 0; }
+    }
+    .ping-amber { animation: ping-amber 1.5s cubic-bezier(0,0,.2,1) infinite; }
+    @keyframes scan-line {
+      0%   { top: 0; }
+      100% { top: 100%; }
+    }
+    .scan-line { animation: scan-line 2s linear infinite; }
+  </style>
+</head>
+<body class="bg-gray-950 bg-grid min-h-screen flex items-center justify-center p-6">
+
+  <!-- Glow backgrounds -->
+  <div class="fixed top-0 right-0 w-96 h-96 bg-indigo-700/10 rounded-full blur-3xl pointer-events-none"></div>
+  <div class="fixed bottom-0 left-0 w-96 h-96 bg-amber-600/10 rounded-full blur-3xl pointer-events-none"></div>
+
+  <div class="w-full max-w-lg">
+
+    <!-- Header -->
+    <div class="text-center mb-8">
+      <div class="inline-flex items-center gap-2 bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs font-semibold uppercase tracking-widest px-4 py-2 rounded-full mb-4">
+        <span class="relative flex h-2 w-2">
+          <span class="ping-amber absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+          <span class="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
+        </span>
+        Genesis Mode Active
+      </div>
+      <h1 class="orbitron text-3xl font-extrabold text-white tracking-widest">SMART EVM</h1>
+      <p class="text-gray-400 text-sm mt-2">First-time system initialisation — this screen appears only once.</p>
+    </div>
+
+    <!-- Card -->
+    <div class="relative bg-gray-900/80 backdrop-blur-xl border border-gray-700/60 rounded-2xl shadow-2xl overflow-hidden">
+      <div class="absolute top-0 left-0 right-0 h-0.5 bg-gradient-to-r from-amber-500 via-indigo-500 to-cyan-500"></div>
+
+      <div class="p-8">
+
+      {% if awaiting_fingerprint %}
+        <!-- Post-form state: waiting for hardware fingerprint -->
+        <div class="text-center py-4">
+          <div class="inline-flex items-center justify-center w-20 h-20 rounded-full border-2 border-dashed border-cyan-500/50 mb-6 relative">
+            <!-- Rotating ring -->
+            <svg class="animate-spin-slow absolute inset-0 w-full h-full text-cyan-500/30" viewBox="0 0 100 100" fill="none">
+              <circle cx="50" cy="50" r="45" stroke="currentColor" stroke-width="3" stroke-dasharray="70 200" />
+            </svg>
+            <svg xmlns="http://www.w3.org/2000/svg" class="w-10 h-10 text-cyan-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+              <path stroke-linecap="round" stroke-linejoin="round"
+                d="M12 11c0-1.104.896-2 2-2s2 .896 2 2v1M7 11c0-2.761 2.239-5 5-5s5 2.239 5 5v1
+                   M5 13c0 3.866 3.134 7 7 7s7-3.134 7-7v-2
+                   M9 17c0 1.657 1.343 3 3 3s3-1.343 3-3v-3
+                   M12 11v6" />
+            </svg>
+          </div>
+          <h2 class="text-white text-lg font-semibold mb-2">Web Admin Created ✓</h2>
+          <p class="text-gray-400 text-sm mb-1">Now scan the <span class="text-cyan-400 font-medium">first Hardware Super Admin</span> fingerprint on the EVM device.</p>
+          <p class="text-gray-600 text-xs mt-4">This page will redirect automatically once the fingerprint is registered.</p>
+
+          <!-- Live state badge -->
+          <div id="state-badge" class="mt-6 inline-flex items-center gap-2 bg-gray-800 border border-gray-700 text-gray-300 text-xs px-4 py-2 rounded-full">
+            <span class="animate-pulse w-2 h-2 rounded-full bg-cyan-400 inline-block"></span>
+            EVM State: <span id="state-text" class="text-cyan-400 font-mono font-semibold">ENROLL_ADMIN</span>
+          </div>
+        </div>
+
+        <script>
+          async function pollState() {
+            try {
+              const r = await fetch('/api/evm/poll');
+              const d = await r.json();
+              document.getElementById('state-text').textContent = d.state;
+              if (d.state === 'IDLE') {
+                // Genesis complete – redirect to login
+                window.location.href = '/login';
+              }
+            } catch (_) {}
+          }
+          setInterval(pollState, 2000);
+          pollState();
+        </script>
+
+      {% else %}
+        <!-- Step 1: create web admin credentials -->
+        <h2 class="text-white font-semibold text-lg mb-2">Create System Administrator</h2>
+        <p class="text-gray-400 text-sm mb-6">
+          No accounts exist yet. Set up your web dashboard login below. You will then be prompted to register a hardware fingerprint admin on the EVM device.
+        </p>
+
+        {% if error %}
+        <div class="flex items-center gap-3 bg-red-900/30 border border-red-500/40 text-red-300 text-sm rounded-lg px-4 py-3 mb-5">
+          <svg class="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+            <path fill-rule="evenodd" d="M18 10A8 8 0 11 2 10a8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zm-1 9a1 1 0 01-1-1V9a1 1 0 112 0v5a1 1 0 01-1 1z" clip-rule="evenodd" />
+          </svg>
+          {{ error }}
+        </div>
+        {% endif %}
+
+        <form method="POST" action="/setup" class="space-y-5">
+          <div>
+            <label class="block text-gray-400 text-xs font-medium uppercase tracking-wider mb-2">Username</label>
+            <input type="text" name="username" id="gen-username" required autocomplete="off"
+              class="w-full bg-gray-800/70 border border-gray-600/60 text-white placeholder-gray-500
+                     rounded-lg px-4 py-3 text-sm focus:outline-none focus:border-indigo-500 focus:ring-1
+                     focus:ring-indigo-500 transition-all duration-200"
+              placeholder="Choose an admin username" />
+          </div>
+          <div>
+            <label class="block text-gray-400 text-xs font-medium uppercase tracking-wider mb-2">Password <span class="text-gray-600 normal-case">(min 6 chars)</span></label>
+            <input type="password" name="password" id="gen-password" required autocomplete="new-password"
+              class="w-full bg-gray-800/70 border border-gray-600/60 text-white placeholder-gray-500
+                     rounded-lg px-4 py-3 text-sm focus:outline-none focus:border-indigo-500 focus:ring-1
+                     focus:ring-indigo-500 transition-all duration-200"
+              placeholder="••••••••" />
+          </div>
+
+          <div class="bg-indigo-950/40 border border-indigo-500/20 rounded-lg p-4 text-xs text-indigo-300 space-y-1">
+            <p class="font-semibold text-indigo-400 mb-2">⚙ What happens next:</p>
+            <p>① Web admin account will be created.</p>
+            <p>② EVM device enters fingerprint enrolment mode.</p>
+            <p>③ Press the EVM's enrol button and scan the first admin finger.</p>
+            <p>④ System unlocks — Genesis Mode locks permanently.</p>
+          </div>
+
+          <button type="submit"
+            class="w-full bg-gradient-to-r from-amber-600 to-indigo-600 hover:from-amber-500 hover:to-indigo-500
+                   text-white font-semibold py-3 rounded-lg transition-all duration-200
+                   shadow-lg shadow-indigo-600/20 hover:scale-[1.02] active:scale-95">
+            Create Admin &amp; Initialise EVM
+          </button>
+        </form>
+      {% endif %}
+
+      </div>
+    </div>
+  </div>
+</body>
+</html>
