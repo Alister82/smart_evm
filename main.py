@@ -11,7 +11,9 @@ Responsibilities:
 
 import asyncio
 import hashlib
+import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 
 from fastapi import (
@@ -104,8 +106,12 @@ async def lifespan(app: FastAPI):
     db = SessionLocal()
     try:
         has_admins    = db.query(Admin).first()   is not None
+        has_web_users = db.query(WebUser).first() is not None
         if not has_admins:
-            await evm.set("GENESIS")
+            if has_web_users:
+                await evm.set("ENROLL_ADMIN", payload={"role": "superadmin", "genesis": True})
+            else:
+                await evm.set("GENESIS")
     finally:
         db.close()
     yield
@@ -150,18 +156,23 @@ async def root(request: Request):
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request, db: Session = Depends(get_db)):
     token = request.cookies.get("access_token")
+    admin_count = db.query(Admin).count()
+    has_web_users = db.query(WebUser).first() is not None
+
+    if admin_count == 0:
+        desired_state = "ENROLL_ADMIN" if has_web_users else "GENESIS"
+        payload = {"role": "superadmin", "genesis": True} if desired_state == "ENROLL_ADMIN" else None
+        state_info = await evm.get()
+        if state_info["state"] != desired_state:
+            await evm.set(desired_state, payload=payload)
+
     if token:
         # Check if we have admins. If not, don't allow dashboard bypass
-        admin_count = db.query(Admin).count()
         if admin_count == 0:
             return RedirectResponse(url="/setup", status_code=status.HTTP_303_SEE_OTHER)
         return redirect_to_dashboard()
-        
-    admin_count = db.query(Admin).count()
+
     if admin_count == 0:
-        state_info = await evm.get()
-        if state_info["state"] not in ("GENESIS", "ENROLL_ADMIN"):
-            await evm.set("GENESIS")
         return RedirectResponse(url="/setup", status_code=status.HTTP_303_SEE_OTHER)
 
     return templates.TemplateResponse(request, "login.html", {"request": request, "error": None})
@@ -181,6 +192,12 @@ async def login_submit(
             {"request": request, "error": "Invalid username or password."},
             status_code=status.HTTP_401_UNAUTHORIZED,
         )
+    
+    # If no admins exist yet, transition to ENROLL_ADMIN state so Arduino prompts for fingerprint
+    admin_count = db.query(Admin).count()
+    if admin_count == 0:
+        await evm.set("ENROLL_ADMIN", payload={"role": "superadmin", "genesis": True})
+    
     token = create_access_token({"sub": user.username})
     response = redirect_to_dashboard()
     response.set_cookie(
@@ -209,11 +226,15 @@ async def setup_page(request: Request, db: Session = Depends(get_db)):
     admin_count = db.query(Admin).count()
     if admin_count > 0:
         return redirect_to_dashboard()
-        
+
+    has_web_users = db.query(WebUser).first() is not None
     state_info = await evm.get()
+    if has_web_users and state_info["state"] != "ENROLL_ADMIN":
+        await evm.set("ENROLL_ADMIN", payload={"role": "superadmin", "genesis": True})
+        state_info = await evm.get()
     if state_info["state"] == "ENROLL_ADMIN":
          return templates.TemplateResponse(request, "setup.html", {"request": request, "error": None, "awaiting_fingerprint": True})
-         
+          
     return templates.TemplateResponse(request, "setup.html", {"request": request, "error": None})
 
 
@@ -416,9 +437,23 @@ async def trigger_enroll_voter(
 # ---------- Poll (every 2 s from Arduino) -----------------------------------
 
 @app.get("/api/evm/poll")
-async def evm_poll():
+async def evm_poll(db: Session = Depends(get_db)):
     """Arduino calls this every 2 seconds to know its current instruction."""
-    return await evm.get()
+    state_info = await evm.get()
+    has_admins = db.query(Admin).first() is not None
+    has_web_users = db.query(WebUser).first() is not None
+
+    if not has_admins:
+        desired_state = "ENROLL_ADMIN" if has_web_users else "GENESIS"
+        payload = {"role": "superadmin", "genesis": True} if desired_state == "ENROLL_ADMIN" else {}
+        if state_info["state"] != desired_state:
+            await evm.set(desired_state, payload=payload)
+        return await evm.get()
+
+    if state_info["state"] == "GENESIS":
+        await evm.set("IDLE")
+        return await evm.get()
+    return state_info
 
 
 # ---------- Fingerprint dispatch --------------------------------------------
@@ -647,6 +682,39 @@ async def get_evm_results(db: Session = Depends(get_db)):
     return JSONResponse(payload)
 
 
+@app.post("/api/admin/reset_database")
+async def reset_database(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: WebUser = Depends(get_current_user),
+):
+    """
+    Reset the entire database and recreate tables.
+    Used after adding new Arduino code or schema changes.
+    """
+    try:
+        from models import engine, Base
+        
+        # Close all connections
+        db.close()
+        
+        # Drop all tables
+        Base.metadata.drop_all(bind=engine)
+        
+        # Recreate all tables
+        Base.metadata.create_all(bind=engine)
+        
+        # Reset EVM state
+        await evm.set("IDLE", payload={})
+        
+        return JSONResponse({"status": "ok", "message": "Database reset successfully. Genesis mode enabled."})
+    except Exception as e:
+        return JSONResponse(
+            {"status": "error", "message": f"Failed to reset database: {str(e)}"},
+            status_code=500
+        )
+
+
 # ============================================================================
 # Exception handlers – turn 303 exceptions into actual redirects
 # ============================================================================
@@ -660,3 +728,9 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         status_code=exc.status_code,
         content={"detail": exc.detail},
     )
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

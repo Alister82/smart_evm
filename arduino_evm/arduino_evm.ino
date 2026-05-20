@@ -4,8 +4,8 @@
 #include <ArduinoJson.h>
 
 // --- Network Configuration ---
-const char* ssid = "YOUR_WIFI_SSID";
-const char* password = "YOUR_WIFI_PASSWORD";
+const char* ssid = "OnePlus Nord2 5G";
+const char* password = "r78rdk8r";
 const char* serverIP = "192.168.1.100";  // FastAPI backend IP
 const int serverPort = 8000;
 
@@ -31,6 +31,9 @@ const unsigned long POLL_INTERVAL = 2000;
 
 // Setup Mode Variables
 bool evmUnlocked = false;
+bool hasServerState = false;
+unsigned long lastServerStateMs = 0;
+bool genesisEnroll = false;
 
 // --- Function Prototypes ---
 void connectWiFi();
@@ -39,6 +42,7 @@ String scanFingerprint();
 String httpPost(String endpoint, String payload);
 String httpGet(String endpoint);
 void updateCandidateDisp(int cand);
+void setFPLed(bool turnOn);
 
 void setup() {
   Serial.begin(115200);   // Debug serial
@@ -83,6 +87,15 @@ void setup() {
 void loop() {
   // 1. Poll the global state continuously
   pollState();
+  if (!hasServerState) {
+    setFPLed(false);
+    lcd.setCursor(0, 0);
+    lcd.print("Waiting Server ");
+    lcd.setCursor(0, 1);
+    lcd.print("Check Backend  ");
+    delay(250);
+    return;
+  }
 
   // 3. Setup Mode Logic (If IDLE)
   if (currentState == "IDLE") {
@@ -92,8 +105,10 @@ void loop() {
       lcd.setCursor(0, 1);
       lcd.print("Scan Admin FP   ");
       
+      setFPLed(true); // Turn on LED for admin scan
       String hash = scanFingerprint();
       if (hash != "") {
+        setFPLed(false); // Turn off LED
         // Authenticate admin
         JsonDocument doc;
         doc["fingerprint_hash"] = hash;
@@ -120,6 +135,7 @@ void loop() {
         }
       }
     } else {
+      setFPLed(false); // Ensure FP LED is off
       // EVM is unlocked, select constituency
       lcd.setCursor(0, 0);
       lcd.print("Select Area: ");
@@ -154,8 +170,10 @@ void loop() {
     lcd.setCursor(0, 1);
     lcd.print("Scan Voter FP   ");
     
+    setFPLed(true); // Turn on LED for voter scan
     String hash = scanFingerprint();
     if (hash != "") {
+      setFPLed(false); // Turn off LED
       JsonDocument doc;
       doc["fingerprint_hash"] = hash;
       doc["constituency_id"] = activeConstituencyId;
@@ -237,6 +255,7 @@ void loop() {
   } 
   // 4b. Poll Closed Logic (Results Viewer)
   else if (currentState == "POLL_CLOSED") {
+    setFPLed(false); // Ensure FP LED is off
     lcd.setCursor(0, 0);
     lcd.print("POLL CLOSED     ");
     lcd.setCursor(0, 1);
@@ -251,7 +270,14 @@ void loop() {
       lcd.setCursor(0, 1);
       lcd.print("To load results ");
       
-      String hash = scanFingerprint();
+      setFPLed(true); // Turn on LED for admin scan
+      String hash = "";
+      while (hash == "") {
+        hash = scanFingerprint();
+        delay(50);
+      }
+      setFPLed(false); // Turn off LED
+      
       if (hash != "") {
         JsonDocument doc;
         doc["fingerprint_hash"] = hash;
@@ -334,35 +360,75 @@ void loop() {
   }
   // Handle other global states (GENESIS, ENROLL_ADMIN, etc.)
   // 5. Enrollment Modes (Genesis, Admin, Voter)
-  else if (currentState == "ENROLL_ADMIN" || currentState == "ENROLL_VOTER" || currentState == "GENESIS" || currentState == "AUTH_ADMIN") {
+  // 5a. Authentication Mode (Checking an existing finger)
+  else if (currentState == "AUTH_ADMIN") {
     lcd.setCursor(0, 0);
-    lcd.print(currentState.substring(0, 16)); // Keep it within 16 chars
+    lcd.print("AUTH ADMIN      "); 
     lcd.setCursor(0, 1);
-    lcd.print("Place Finger... ");
+    lcd.print("Scan Admin FP   ");
     
-    String newHash = scanFingerprint();
+    setFPLed(true); // Turn on LED
+    String hash = scanFingerprint();
+    
+    if (hash != "") {
+      setFPLed(false); // Turn off LED
+      lcd.clear();
+      lcd.print("Sending to DB...");
+      
+      JsonDocument doc;
+      doc["fingerprint_hash"] = hash;
+      String payload;
+      serializeJson(doc, payload);
+      
+      String res = httpPost("/api/evm/fingerprint", payload);
+      
+      lcd.clear();
+      lcd.print("Sent Success!");
+      delay(2000);
+      currentState = "IDLE"; 
+    }
+  }
+  // 5b. Genesis Mode (Waiting for web setup)
+  else if (currentState == "GENESIS") {
+    setFPLed(false); // Ensure FP LED is off
+    lcd.setCursor(0, 0);
+    lcd.print("Genesis Mode    ");
+    lcd.setCursor(0, 1);
+    lcd.print("Setup in Web    ");
+    delay(3000);
+    // Re-poll to check if web has transitioned us to ENROLL_ADMIN
+  }
+  // 5c. Enrollment Modes (Registering a NEW finger)
+  else if (currentState == "ENROLL_ADMIN" || currentState == "ENROLL_VOTER") {
+    lcd.setCursor(0, 0);
+    lcd.print(currentState.substring(0, 16)); 
+    lcd.setCursor(0, 1);
+    lcd.print("Enroll NEW FP...");
+    
+    // WE MUST USE THE NEW ENROLL FUNCTION HERE!
+    String newHash = enrollNewFingerprint(genesisEnroll); 
     
     if (newHash != "") {
       lcd.clear();
-      lcd.print("Sending to DB...");
+      lcd.print("Saving to DB...");
       
       JsonDocument doc;
       doc["fingerprint_hash"] = newHash;
       String payload;
       serializeJson(doc, payload);
       
-      // Post the new fingerprint to the backend
       String res = httpPost("/api/evm/fingerprint", payload);
       
       lcd.clear();
-      lcd.print("Sent Success!");
+      lcd.print("Saved Success!");
       delay(2000);
-      
-      // Temporarily revert to IDLE locally until the next poll updates the state
       currentState = "IDLE"; 
     }
   }
-}
+  else {
+    setFPLed(false); // Turn off LED for any unhandled states
+  }
+} // <-- ADDED MISSING CLOSING BRACE FOR loop()
 
 // --- Helper Functions ---
 
@@ -404,44 +470,59 @@ void pollState() {
     }
   }
 
-  // Parse response
-  String response = "";
-  bool isBody = false;
-  while (client.available()) {
-    String line = client.readStringUntil('\n');
-    if (line == "\r") isBody = true;
-    else if (isBody) response += line;
-  }
+  String response = client.readString();
+  client.stop(); // <-- Prevent socket leak
+
+  int jsonStart = response.indexOf('{');
+  int jsonEnd = response.lastIndexOf('}');
+  if (jsonStart < 0 || jsonEnd < 0 || jsonEnd <= jsonStart) return;
+  String json = response.substring(jsonStart, jsonEnd + 1);
 
   // Strictly use ArduinoJson 7 Document
   JsonDocument doc;
-  DeserializationError error = deserializeJson(doc, response);
+  DeserializationError error = deserializeJson(doc, json);
   if (!error) {
     String newState = doc["state"].as<String>();
     if (newState != "null" && newState.length() > 0) {
-      currentState = newState;
+      bool newGenesisEnroll = false;
+      JsonVariant payload = doc["payload"];
+      if (payload.is<JsonObject>() && payload["genesis"] == true) {
+        newGenesisEnroll = true;
+      }
+
+      // Prevent backend "IDLE" from overwriting our local "VOTING" state
+      if (currentState == "VOTING" && newState == "IDLE") {
+        // Keep it as VOTING locally until backend changes to POLL_CLOSED
+      } else {
+        if (newState == "GENESIS" || newState == "ENROLL_ADMIN") {
+          evmUnlocked = false;
+        }
+        currentState = newState;
+      }
+      if (newState == "ENROLL_ADMIN") {
+        genesisEnroll = newGenesisEnroll;
+      } else if (newState != "ENROLL_ADMIN") {
+        genesisEnroll = false;
+      }
+      hasServerState = true;
+      lastServerStateMs = millis();
     }
+  }
+}
+
+void setFPLed(bool turnOn) {
+  static bool currentLedState = false;
+  if (currentLedState != turnOn) {
+    finger.LEDcontrol(turnOn);
+    currentLedState = turnOn;
   }
 }
 
 // 2. Fingerprint Logic (Non-Blocking)
 String scanFingerprint() {
-  unsigned long startTime = millis();
-  int p = -1;
-  
-  // Wait for finger to be put down
-  while (p != FINGERPRINT_OK) {
-    // 15 second timeout to avoid freezing
-    if (millis() - startTime > 15000) {
-      return "";
-    }
-    p = finger.getImage();
-    if (p != FINGERPRINT_OK && p != FINGERPRINT_NOFINGER) {
-      // Read error or other issue
-      delay(50);
-    }
-    // Poll the network state minimally while waiting if needed
-    // However, specs say "resume polling so board doesn't freeze" after returning empty string.
+  int p = finger.getImage();
+  if (p != FINGERPRINT_OK) {
+    return ""; // Return immediately if no finger, allows loop() to continue polling
   }
 
   // Got image
@@ -464,6 +545,90 @@ String scanFingerprint() {
     return "";
   }
   
+  return "";
+}
+
+// A blocking function to register a NEW fingerprint to a free ID
+String enrollNewFingerprint(bool isGenesisEnroll) {
+  finger.getTemplateCount();
+  int id = finger.templateCount + 1;
+  if (id > 127) {
+    lcd.clear(); lcd.setCursor(0,0); lcd.print("Error: Sensor");
+    lcd.setCursor(0,1); lcd.print("is full!");
+    delay(2000);
+    return "";
+  }
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  if (isGenesisEnroll) {
+    lcd.print("First Admin FP ");
+  } else {
+    lcd.print("Enroll New FP  ");
+  }
+  lcd.setCursor(0, 1);
+  lcd.print("Place finger...");
+  
+  setFPLed(true); // Turn on LED
+  uint8_t p = -1;
+  while (p != FINGERPRINT_OK) {
+    p = finger.getImage();
+    delay(50);
+  }
+  setFPLed(false); // Turn off LED
+
+  p = finger.image2Tz(1);
+  if (p != FINGERPRINT_OK) {
+    lcd.clear(); lcd.setCursor(0,0); lcd.print("Bad Image");
+    lcd.setCursor(0,1); lcd.print("Try Again");
+    delay(1000);
+    return "";
+  }
+  
+  lcd.clear(); lcd.setCursor(0,0); lcd.print("Remove finger");
+  delay(2000);
+  
+  p = 0;
+  while (p != FINGERPRINT_NOFINGER) {
+    p = finger.getImage();
+    delay(50);
+  }
+
+  lcd.clear(); lcd.setCursor(0,0); lcd.print("Place same");
+  lcd.setCursor(0,1); lcd.print("finger again");
+  
+  setFPLed(true); // Turn on LED
+  p = -1;
+  while (p != FINGERPRINT_OK) {
+    p = finger.getImage();
+    delay(50);
+  }
+  setFPLed(false); // Turn off LED
+
+  p = finger.image2Tz(2);
+  if (p != FINGERPRINT_OK) {
+    lcd.clear(); lcd.setCursor(0,0); lcd.print("Bad Image");
+    lcd.setCursor(0,1); lcd.print("Try Again");
+    delay(1000);
+    return "";
+  }
+  
+  p = finger.createModel();
+  if (p == FINGERPRINT_OK) {
+    p = finger.storeModel(id);
+    if (p == FINGERPRINT_OK) {
+      char hashBuf[64];
+      sprintf(hashBuf, "R307_FP_HASH_%04d", id);
+      return String(hashBuf);
+    } else {
+      lcd.clear(); lcd.setCursor(0,0); lcd.print("Store Failed!");
+      delay(1000);
+    }
+  } else {
+    lcd.clear(); lcd.setCursor(0,0); lcd.print("Match Failed!");
+    lcd.setCursor(0,1); lcd.print("Fingers differ");
+    delay(1500);
+  }
   return "";
 }
 
@@ -491,11 +656,14 @@ String httpPost(String endpoint, String payload) {
 
   String response = "";
   bool isBody = false;
-  while (client.available()) {
-    String line = client.readStringUntil('\n');
-    if (line == "\r") isBody = true;
-    else if (isBody) response += line;
+  while (client.connected() || client.available()) {
+    if (client.available()) {
+      String line = client.readStringUntil('\n');
+      if (line == "\r" || line == "") isBody = true;
+      else if (isBody) response += line;
+    }
   }
+  client.stop(); // <-- Prevent socket leak
   return response;
 }
 
@@ -520,11 +688,14 @@ String httpGet(String endpoint) {
 
   String response = "";
   bool isBody = false;
-  while (client.available()) {
-    String line = client.readStringUntil('\n');
-    if (line == "\r") isBody = true;
-    else if (isBody) response += line;
+  while (client.connected() || client.available()) {
+    if (client.available()) {
+      String line = client.readStringUntil('\n');
+      if (line == "\r" || line == "") isBody = true;
+      else if (isBody) response += line;
+    }
   }
+  client.stop(); // <-- Prevent socket leak
   return response;
 }
 
