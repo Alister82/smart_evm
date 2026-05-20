@@ -11,9 +11,8 @@ Responsibilities:
 
 import asyncio
 import hashlib
-import os
+import re
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Optional
 
 from fastapi import (
@@ -28,6 +27,7 @@ from sqlalchemy import func
 
 from auth import (
     create_access_token,
+    decode_access_token,
     get_current_user,
     hash_password,
     verify_password,
@@ -112,6 +112,8 @@ async def lifespan(app: FastAPI):
                 await evm.set("ENROLL_ADMIN", payload={"role": "superadmin", "genesis": True})
             else:
                 await evm.set("GENESIS")
+        else:
+            await evm.set("IDLE", payload={"lock": True, "force_idle": True})
     finally:
         db.close()
     yield
@@ -135,6 +137,33 @@ def redirect_to_login():
 
 def redirect_to_dashboard():
     return RedirectResponse(url="/dashboard", status_code=status.HTTP_303_SEE_OTHER)
+
+
+def normalize_fp_hash(fp_hash: str) -> str:
+    """Normalize fingerprint hash to a canonical R307_FP_HASH_#### format."""
+    if not fp_hash:
+        return fp_hash
+    raw = fp_hash.strip()
+    match = re.search(r"(\d+)$", raw)
+    if match:
+        return f"R307_FP_HASH_{int(match.group(1)):04d}"
+    return raw
+
+
+def unique_election_name(db: Session, base_name: str) -> str:
+    """Ensure archived election names remain unique without failing the reset."""
+    name = base_name.strip()
+    if not name:
+        return name
+    existing = db.query(ArchivedElection).filter(ArchivedElection.name == name).first()
+    if not existing:
+        return name
+    suffix = 2
+    while True:
+        candidate = f"{name} ({suffix})"
+        if not db.query(ArchivedElection).filter(ArchivedElection.name == candidate).first():
+            return candidate
+        suffix += 1
 
 
 # ============================================================================
@@ -167,10 +196,23 @@ async def login_page(request: Request, db: Session = Depends(get_db)):
             await evm.set(desired_state, payload=payload)
 
     if token:
-        # Check if we have admins. If not, don't allow dashboard bypass
+        payload = decode_access_token(token)
+        if payload is not None:
+            username: str = payload.get("sub", "")
+            user = db.query(WebUser).filter(WebUser.username == username).first()
+            if user is not None:
+                # Check if we have admins. If not, don't allow dashboard bypass
+                if admin_count == 0:
+                    return RedirectResponse(url="/setup", status_code=status.HTTP_303_SEE_OTHER)
+                return redirect_to_dashboard()
+
+        # Invalid/expired token or missing user → clear cookie and continue
         if admin_count == 0:
-            return RedirectResponse(url="/setup", status_code=status.HTTP_303_SEE_OTHER)
-        return redirect_to_dashboard()
+            response = RedirectResponse(url="/setup", status_code=status.HTTP_303_SEE_OTHER)
+        else:
+            response = templates.TemplateResponse(request, "login.html", {"request": request, "error": None})
+        response.delete_cookie("access_token")
+        return response
 
     if admin_count == 0:
         return RedirectResponse(url="/setup", status_code=status.HTTP_303_SEE_OTHER)
@@ -470,7 +512,7 @@ async def evm_fingerprint(body: FingerprintPayload, db: Session = Depends(get_db
       AUTH_ADMIN              → verify existing admin, then execute pending action
       ENROLL_VOTER            → register new Voter row
     """
-    fp_hash    = body.fingerprint_hash.strip()
+    fp_hash    = normalize_fp_hash(body.fingerprint_hash)
     state_info = await evm.get()
     current    = evm.state   # direct read (already locked above)
 
@@ -566,9 +608,19 @@ async def verify_admin(body: AdminVerifyPayload, db: Session = Depends(get_db)):
     """
     Called on EVM power-on. Returns unlock token if fingerprint matches an admin.
     """
-    admin = db.query(Admin).filter(Admin.fingerprint_hash == body.fingerprint_hash).first()
+    normalized = normalize_fp_hash(body.fingerprint_hash)
+    admin = db.query(Admin).filter(Admin.fingerprint_hash == normalized).first()
+    if not admin:
+        for candidate in db.query(Admin).all():
+            if normalize_fp_hash(candidate.fingerprint_hash) == normalized:
+                admin = candidate
+                break
     if not admin:
         return JSONResponse({"status": "reject", "message": "Unrecognised admin.", "authorized": False}, status_code=403)
+    if admin.fingerprint_hash != normalized:
+        admin.fingerprint_hash = normalized
+        db.commit()
+    await evm.set("IDLE", payload={"lock": False})
     # Issue a short-lived hardware session token
     hw_token = create_access_token({"sub": f"hw_admin_{admin.id}", "role": admin.role}, )
     return JSONResponse({"status": "unlock", "token": hw_token, "admin_id": admin.id, "authorized": True})
@@ -643,7 +695,8 @@ async def start_new_election(
     
     try:
         # Create history record
-        archived_election = ArchivedElection(name=election_name.strip())
+        archived_name = unique_election_name(db, election_name)
+        archived_election = ArchivedElection(name=archived_name)
         db.add(archived_election)
         db.flush()
         
@@ -657,17 +710,17 @@ async def start_new_election(
             ))
             
         # Clear active votes
-        db.query(Vote).delete()
+        db.query(Vote).delete(synchronize_session=False)
         
         # Reset voters
-        db.query(Voter).update({"has_voted": False})
+        db.query(Voter).update({"has_voted": False}, synchronize_session=False)
         
         db.commit()
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to start new election: {str(e)}")
 
-    await evm.set("IDLE")
+    await evm.set("IDLE", payload={"lock": True, "force_idle": True})
     return redirect_to_dashboard()
 
 

@@ -485,13 +485,23 @@ void pollState() {
     String newState = doc["state"].as<String>();
     if (newState != "null" && newState.length() > 0) {
       bool newGenesisEnroll = false;
+      bool forceLock = false;
+      bool forceIdle = false;
       JsonVariant payload = doc["payload"];
-      if (payload.is<JsonObject>() && payload["genesis"] == true) {
-        newGenesisEnroll = true;
+      if (payload.is<JsonObject>()) {
+        if (payload["genesis"] == true) {
+          newGenesisEnroll = true;
+        }
+        if (payload["lock"] == true) {
+          forceLock = true;
+        }
+        if (payload["force_idle"] == true) {
+          forceIdle = true;
+        }
       }
 
       // Prevent backend "IDLE" from overwriting our local "VOTING" state
-      if (currentState == "VOTING" && newState == "IDLE") {
+      if (currentState == "VOTING" && newState == "IDLE" && !forceLock && !forceIdle) {
         // Keep it as VOTING locally until backend changes to POLL_CLOSED
       } else {
         if (newState == "GENESIS" || newState == "ENROLL_ADMIN") {
@@ -503,6 +513,9 @@ void pollState() {
         genesisEnroll = newGenesisEnroll;
       } else if (newState != "ENROLL_ADMIN") {
         genesisEnroll = false;
+      }
+      if (newState == "IDLE" && forceLock) {
+        evmUnlocked = false;
       }
       hasServerState = true;
       lastServerStateMs = millis();
@@ -536,7 +549,9 @@ String scanFingerprint() {
     lcd.setCursor(0, 1);
     lcd.print("Found FP!       ");
     delay(500);
-    return "R307_HASH_" + String(finger.fingerID);
+    char hashBuf[64];
+    sprintf(hashBuf, "R307_FP_HASH_%04d", finger.fingerID);
+    return String(hashBuf);
   } else if (p == FINGERPRINT_NOTFOUND) {
     lcd.setCursor(0, 1);
     lcd.print("FP Not Found!   ");
